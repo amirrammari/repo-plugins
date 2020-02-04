@@ -1,24 +1,25 @@
 # SPDX-License-Identifier: CC-BY-NC-SA-4.0
 
 import datetime
+import pytz
 import re
 
-import chn_class
+from resources.lib import chn_class
 
-from logger import Logger
-from regexer import Regexer
-from helpers import subtitlehelper
-from helpers.jsonhelper import JsonHelper
-from streams.npostream import NpoStream
-from urihandler import UriHandler
-from helpers.datehelper import DateHelper
-from parserdata import ParserData
-from helpers.languagehelper import LanguageHelper
-from helpers.htmlentityhelper import HtmlEntityHelper
-from vault import Vault
-from addonsettings import AddonSettings, LOCAL
-from mediaitem import MediaItem
-from xbmcwrapper import XbmcWrapper
+from resources.lib.logger import Logger
+from resources.lib.regexer import Regexer
+from resources.lib.helpers import subtitlehelper
+from resources.lib.helpers.jsonhelper import JsonHelper
+from resources.lib.streams.npostream import NpoStream
+from resources.lib.urihandler import UriHandler
+from resources.lib.helpers.datehelper import DateHelper
+from resources.lib.parserdata import ParserData
+from resources.lib.helpers.languagehelper import LanguageHelper
+from resources.lib.helpers.htmlentityhelper import HtmlEntityHelper
+from resources.lib.vault import Vault
+from resources.lib.addonsettings import AddonSettings, LOCAL
+from resources.lib.mediaitem import MediaItem
+from resources.lib.xbmcwrapper import XbmcWrapper
 
 
 class Channel(chn_class.Channel):
@@ -189,19 +190,27 @@ class Channel(chn_class.Channel):
             "NOSJ": "NPO Nieuws"
         }
         self.__has_premium_cache = None
+        self.__timezone = pytz.timezone("Europe/Amsterdam")
 
         # ====================================== Actual channel setup STOPS here =======================================
         return
 
     def log_on(self):
+        return self.__log_on(False)
+
+    def __log_on(self, force_log_off=False):
         """ Makes sure that we are logged on. """
 
         username = self._get_setting("username")
         previous_name = AddonSettings.get_channel_setting(self, "previous_username", store=LOCAL)
         log_out = previous_name != username
-        if log_out:
-            Logger.info("Username changed for NPO from '%s' to '%s'", previous_name, username)
+        if log_out or force_log_off:
+            if log_out:
+                Logger.info("Username changed for NPO from '%s' to '%s'", previous_name, username)
+            else:
+                Logger.info("Forcing a new login for NPO")
             UriHandler.delete_cookie(domain="www.npostart.nl")
+            UriHandler.delete_cookie(domain=".npostart.nl")
             AddonSettings.set_channel_setting(self, "previous_username", username, store=LOCAL)
 
         if not username:
@@ -858,7 +867,7 @@ class Channel(chn_class.Channel):
                 Logger.trace("Invalid EPG channel: %s", channel)
                 return None
             name = "{} - {}".format(channel, result_set["title"])
-            if result_set["title"] != result_set["episodeTitle"]:
+            if result_set["episodeTitle"] and result_set["title"] != result_set["episodeTitle"]:
                 name = "{} - {}".format(name, result_set["episodeTitle"])
         else:
             name = result_set.get('episodeTitle')
@@ -877,17 +886,26 @@ class Channel(chn_class.Channel):
         date_format = "%Y-%m-%dT%H:%M:%SZ"
         date = result_set.get('broadcastDate')
         if date:
-            time_stamp = DateHelper.get_date_from_string(date, date_format=date_format)
+            # The dates are in UTC, so we need to calculate the actual
+            # time and take the DST in consideration for each item.
+            date_time = DateHelper.get_datetime_from_string(
+                date, date_format=date_format, time_zone="UTC")
+            date_time = date_time.astimezone(self.__timezone)
+
             if for_epg:
-                date_time = datetime.datetime(*time_stamp[:6]) + datetime.timedelta(hours=2)
                 item.name = "{:02}:{:02} - {}".format(
                     date_time.hour, date_time.minute, item.name)
             else:
-                item.set_date(*time_stamp[0:6])
+                item.set_date(date_time.year, date_time.month, date_time.day,
+                              date_time.hour, date_time.minute, date_time.second)
+
+            # For #933 we check for NOS Journaal
+            if item.name == "NOS Journaal":
+                item.name = "{2} - {0:02d}:{1:02d}".format(date_time.hour, date_time.minute, item.name)
 
         item.isPaid = result_set.get("isOnlyOnNpoPlus", False)
         availability = result_set.get("availability")
-        if not item.isPaid and availability and availability["to"]:
+        if not item.isPaid and availability and availability["to"] and availability["to"] != availability["from"]:
             to_date = DateHelper.get_date_from_string(availability["to"], date_format=date_format)
             to_datetime = datetime.datetime(*to_date[:6])
             item.isPaid = to_datetime < datetime.datetime.now()
@@ -898,7 +916,7 @@ class Channel(chn_class.Channel):
         item.fanart = self.parentItem.fanart
         for image_type, image_data in images.items():
             if image_type == "original" and "original" in image_data["formats"]:
-                pass
+                continue
                 # No fanart for now.
                 # item.fanart = image_data["formats"]["original"]["source"]
             elif image_type == "grid.tile":
@@ -947,7 +965,9 @@ class Channel(chn_class.Channel):
         """
 
         Logger.trace(result_set)
-        item = self.create_api_video_item(result_set["program"], for_epg=True)
+        epg_result_set = result_set["program"]
+        epg_result_set["broadcastDate"] = result_set.get("startsAt", epg_result_set["broadcastDate"])
+        item = self.create_api_video_item(epg_result_set, for_epg=True)
 
         return item
 
@@ -1332,6 +1352,10 @@ class Channel(chn_class.Channel):
         if AddonSettings.use_adaptive_stream_add_on(
                 with_encryption=True, ignore_add_on_config=True):
             error = NpoStream.add_mpd_stream_from_npo(None, episode_id, part, proxy=self.proxy, live=item.isLive)
+            if bool(error) and self.__has_premium():
+                self.__log_on(force_log_off=True)
+                error = NpoStream.add_mpd_stream_from_npo(None, episode_id, part, proxy=self.proxy, live=item.isLive)
+
             if bool(error):
                 XbmcWrapper.show_dialog(
                     LanguageHelper.get_localized_string(LanguageHelper.ErrorId),
@@ -1421,6 +1445,8 @@ class Channel(chn_class.Channel):
             if date_time[-2].isalpha():
                 year = date_premium.tm_year if date_premium else datetime.datetime.now().year
                 date_time.insert(-1, year)
+
+            # For #933 we check for NOS Journaal
             if item.name.startswith("NOS Journaal"):
                 item.name = "{0} - {1}".format(item.name, date_time[-1])
             year = int(date_time[-2])

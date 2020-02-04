@@ -4,19 +4,21 @@
 import math
 import datetime
 
-import chn_class
-from mediaitem import MediaItem
-from addonsettings import AddonSettings
-from helpers.jsonhelper import JsonHelper
+from resources.lib import chn_class
+from resources.lib.mediaitem import MediaItem
+from resources.lib.addonsettings import AddonSettings
+from resources.lib.helpers.jsonhelper import JsonHelper
 
-from parserdata import ParserData
-from regexer import Regexer
-from helpers.htmlentityhelper import HtmlEntityHelper
-from helpers.languagehelper import LanguageHelper
-from logger import Logger
-from streams.m3u8 import M3u8
-from urihandler import UriHandler
-from helpers.subtitlehelper import SubtitleHelper
+from resources.lib.parserdata import ParserData
+from resources.lib.regexer import Regexer
+from resources.lib.helpers.htmlentityhelper import HtmlEntityHelper
+from resources.lib.helpers.languagehelper import LanguageHelper
+from resources.lib.logger import Logger
+from resources.lib.streams.mpd import Mpd
+from resources.lib.xbmcwrapper import XbmcWrapper
+from resources.lib.streams.m3u8 import M3u8
+from resources.lib.urihandler import UriHandler
+from resources.lib.helpers.subtitlehelper import SubtitleHelper
 
 
 class Channel(chn_class.Channel):
@@ -48,7 +50,7 @@ class Channel(chn_class.Channel):
             raise Exception("Invalid channel code")
 
         # setup the urls
-        # self.mainListUri = "http://webapi.tv4play.se/play/programs?is_active=true&platform=tablet&per_page=1000" \
+        # self.mainListUri = "https://api.tv4play.se/play/programs?is_active=true&platform=tablet&per_page=1000" \
         #                    "&fl=nid,name,program_image&start=0"
 
         self.mainListUri = "#mainlisting"
@@ -59,14 +61,14 @@ class Channel(chn_class.Channel):
         self._add_data_parser(self.mainListUri, preprocessor=self.add_categories_and_specials)
 
         self.episodeItemJson = ["results", ]
-        self._add_data_parser("http://webapi.tv4play.se/play/programs?", json=True,
+        self._add_data_parser("https://api.tv4play.se/play/programs?", json=True,
                               # No longer used:  requiresLogon=True,
                               parser=self.episodeItemJson, creator=self.create_episode_item)
 
-        self._add_data_parser("http://webapi.tv4play.se/play/categories.json",
+        self._add_data_parser("https://api.tv4play.se/play/categories.json",
                               json=True, match_type=ParserData.MatchExact,
                               parser=[], creator=self.create_category_item)
-        self._add_data_parser("http://webapi.tv4play.se/play/programs?platform=tablet&category=",
+        self._add_data_parser("https://api.tv4play.se/play/programs?platform=tablet&category=",
                               json=True,
                               parser=self.episodeItemJson, creator=self.create_episode_item)
 
@@ -83,6 +85,7 @@ class Channel(chn_class.Channel):
         #===============================================================================================================
         # non standard items
         self.maxPageSize = 25  # The Android app uses a page size of 20
+        self.__expires_text = LanguageHelper.get_localized_string(LanguageHelper.ExpiresAt)
 
         #===============================================================================================================
         # Test cases:
@@ -217,7 +220,7 @@ class Channel(chn_class.Channel):
 
         program_id = json["nid"]
         program_id = HtmlEntityHelper.url_encode(program_id)
-        url = "http://webapi.tv4play.se/play/video_assets" \
+        url = "https://api.tv4play.se/play/video_assets" \
               "?platform=tablet&per_page=%s&is_live=false&type=episode&" \
               "page=1&node_nids=%s&start=0" % (self.maxPageSize, program_id, )
 
@@ -239,6 +242,7 @@ class Channel(chn_class.Channel):
         item = MediaItem(title, url)
         item.icon = self.icon
         item.thumb = result_set.get("program_image", self.noImage)
+        item.fanart = result_set.get("program_image", self.fanart)
         item.isPaid = result_set.get("is_premium", False)
         return item
 
@@ -265,7 +269,7 @@ class Channel(chn_class.Channel):
         extras = {
             LanguageHelper.get_localized_string(LanguageHelper.Search): ("searchSite", None, False),
             LanguageHelper.get_localized_string(LanguageHelper.TvShows): (
-                "http://webapi.tv4play.se/play/programs?is_active=true&platform=tablet"
+                "https://api.tv4play.se/play/programs?is_active=true&platform=tablet"
                 "&per_page=1000&fl=nid,name,program_image,is_premium,updated_at,channel&start=0",
                 None,
                 False
@@ -276,21 +280,14 @@ class Channel(chn_class.Channel):
         if self.channelCode == "tv4se":
             extras.update({
                 LanguageHelper.get_localized_string(LanguageHelper.Categories): (
-                    "http://webapi.tv4play.se/play/categories.json", None, False
+                    "https://api.tv4play.se/play/categories.json", None, False
                 ),
                 LanguageHelper.get_localized_string(LanguageHelper.MostViewedEpisodes): (
-                    "http://webapi.tv4play.se/play/video_assets/most_viewed?type=episode"
+                    "https://api.tv4play.se/play/video_assets/most_viewed?type=episode"
                     "&platform=tablet&is_live=false&per_page=%s&start=0" % (self.maxPageSize,),
                     None, False
                 ),
             })
-            # if self.loggedOn:
-            #     extras.update({
-            #         "\a.: Favoriter :.": (
-            #             "http://www.tv4play.se/program/favourites",
-            #             None, True
-            #         ),
-            #     })
 
             today = datetime.datetime.now()
             days = [LanguageHelper.get_localized_string(LanguageHelper.Monday),
@@ -312,7 +309,7 @@ class Channel(chn_class.Channel):
 
                 Logger.trace("Adding item for: %s - %s", start_date, end_date)
                 # Old URL:
-                # url = "http://webapi.tv4play.se/play/video_assets?exclude_node_nids=" \
+                # url = "https://api.tv4play.se/play/video_assets?exclude_node_nids=" \
                 #       "nyheterna,v%C3%A4der,ekonomi,lotto,sporten,nyheterna-blekinge,nyheterna-bor%C3%A5s," \
                 #       "nyheterna-dalarna,nyheterna-g%C3%A4vle,nyheterna-g%C3%B6teborg,nyheterna-halland," \
                 #       "nyheterna-helsingborg,nyheterna-j%C3%B6nk%C3%B6ping,nyheterna-kalmar,nyheterna-link%C3%B6ping," \
@@ -322,13 +319,13 @@ class Channel(chn_class.Channel):
                 #       "nyheterna-v%C3%A4xj%C3%B6,nyheterna-%C3%B6rebro,nyheterna-%C3%B6stersund,tv4-tolken," \
                 #       "fotbollskanalen-europa" \
                 #       "&platform=tablet&per_page=32&is_live=false&product_groups=2&type=episode&per_page=100"
-                url = "http://webapi.tv4play.se/play/video_assets?exclude_node_nids=" \
+                url = "https://api.tv4play.se/play/video_assets?exclude_node_nids=" \
                       "&platform=tablet&per_page=32&is_live=false&product_groups=2&type=episode&per_page=100"
                 url = "%s&broadcast_from=%s&broadcast_to=%s&" % (url, start_date.strftime("%Y%m%d"), end_date.strftime("%Y%m%d"))
                 extras[day] = (url, start_date, False)
 
         extras[LanguageHelper.get_localized_string(LanguageHelper.CurrentlyPlayingEpisodes)] = (
-            "http://webapi.tv4play.se/play/video_assets?exclude_node_nids=&platform=tablet&"
+            "https://api.tv4play.se/play/video_assets?exclude_node_nids=&platform=tablet&"
             "per_page=32&is_live=true&product_groups=2&type=episode&per_page=100", None, False)
 
         for name in extras:
@@ -379,7 +376,7 @@ class Channel(chn_class.Channel):
 
         """
 
-        url = "http://webapi.tv4play.se/play/video_assets?platform=tablet&per_page=%s&page=1" \
+        url = "https://api.tv4play.se/play/video_assets?platform=tablet&per_page=%s&page=1" \
               "&sort_order=desc&type=episode&q=%%s&start=0" % (self.maxPageSize, )
         return chn_class.Channel.search_site(self, url)
 
@@ -412,12 +409,13 @@ class Channel(chn_class.Channel):
             cat_id = self.parentItem.url[cat_start + 10:]
             Logger.debug("Currently doing CatId: '%s'", cat_id)
 
-            url = "http://webapi.tv4play.se/play/video_assets?platform=tablet&per_page=%s&" \
+            url = "https://api.tv4play.se/play/video_assets?platform=tablet&per_page=%s&" \
                   "type=clip&page=1&node_nids=%s&start=0" % (self.maxPageSize, cat_id,)
             clips_title = LanguageHelper.get_localized_string(LanguageHelper.Clips)
             clips = MediaItem(clips_title, url)
             clips.icon = self.icon
-            clips.thumb = self.noImage
+            clips.thumb = self.parentItem.thumb
+            clips.fanart = self.parentItem.fanart
             clips.complete = True
             items.append(clips)
 
@@ -430,11 +428,14 @@ class Channel(chn_class.Channel):
             more = MediaItem(more_title, "")
             more.icon = self.icon
             more.thumb = self.noImage
+            more.thumb = self.parentItem.thumb
+            more.fanart = self.parentItem.fanart
             more.complete = True
             items.append(more)
 
             # what are the total number of pages?
             current_page = 1
+            # noinspection PyTypeChecker
             total_pages = int(math.ceil(1.0 * total_items / self.maxPageSize))
 
             current_url = self.parentItem.url
@@ -448,6 +449,8 @@ class Channel(chn_class.Channel):
                 page = MediaItem(str(current_page), url)
                 page.icon = self.icon
                 page.thumb = self.noImage
+                page.thumb = self.parentItem.thumb
+                page.fanart = self.parentItem.fanart
                 page.type = "page"
                 page.complete = True
 
@@ -486,15 +489,35 @@ class Channel(chn_class.Channel):
         program_id = result_set["id"]
         # Logger.Debug("ProgId = %s", programId)
 
-        url = "https://playback-api.b17g.net/media/%s?service=tv4&device=browser&protocol=hls" % (program_id,)
+        # We can either use M3u8 or Dash
+        # url = "https://playback-api.b17g.net/media/%s?service=tv4&device=browser&protocol=hls" % (program_id,)
+        url = "https://playback-api.b17g.net/media/%s?service=tv4&device=browser&protocol=dash" % (program_id,)
         name = result_set["title"]
+        season = result_set.get("season", 0)
+        episode = result_set.get("episode", 0)
+        is_episodic = 0 < season < 1900 and not episode == 0
+        if is_episodic:
+            name, episode_text = result_set["title"].split(" del ", 1)
+            episode_text = episode_text.lstrip("0123456789")
+            if episode_text:
+                episode_text = episode_text.lstrip(" -")
+                name = "{} - s{:02d}e{:02d} - {}".format(name, season, episode, episode_text)
+            else:
+                name = "{} - s{:02d}e{:02d}".format(name, season, episode, episode_text)
 
         item = MediaItem(name, url)
         item.description = result_set["description"]
         if item.description is None:
             item.description = item.name
 
+        if is_episodic:
+            item.set_season_info(season, episode)
+
         # premium_expire_date_time=2099-12-31T00:00:00+01:00
+        expire_date = result_set.get("expire_date_time")
+        if bool(expire_date):
+            self.__set_expire_time(expire_date, item)
+
         date = result_set["broadcast_date_time"]
         (date_part, time_part) = date.split("T")
         (year, month, day) = date_part.split("-")
@@ -502,6 +525,7 @@ class Channel(chn_class.Channel):
         item.set_date(year, month, day, hour, minutes, 00)
         broadcast_date = datetime.datetime(int(year), int(month), int(day), int(hour), int(minutes))
 
+        item.fanart = result_set.get("program_image", self.parentItem.fanart)
         thumb_url = result_set.get("image", result_set.get("program_image"))
         # some images need to come via a proxy:
         if thumb_url and "://img.b17g.net/" in thumb_url:
@@ -538,8 +562,12 @@ class Channel(chn_class.Channel):
         item.isDrmProtected = result_set["is_drm_protected"]
         item.isLive = result_set.get("is_live", False)
         if item.isLive:
+            item.name = "{}:{} - {}".format(hour, minutes, name)
             item.url = "{0}&is_live=true".format(item.url)
+        if item.isDrmProtected:
+            item.url = "{}&drm=widevine&is_drm=true".format(item.url)
 
+        item.set_info_label("duration", int(result_set.get("duration", 0)))
         return item
 
     def create_category_item(self, result_set):
@@ -559,7 +587,7 @@ class Channel(chn_class.Channel):
         Logger.trace(result_set)
 
         cat = HtmlEntityHelper.url_encode(result_set['nid'])
-        url = "http://webapi.tv4play.se/play/programs?platform=tablet&category=%s" \
+        url = "https://api.tv4play.se/play/programs?platform=tablet&category=%s" \
               "&fl=nid,name,program_image,category,logo,is_premium" \
               "&per_page=1000&is_active=true&start=0" % (cat, )
         item = MediaItem(result_set['name'], url)
@@ -608,21 +636,24 @@ class Channel(chn_class.Channel):
         # retrieve the mediaurl
         data = UriHandler.open(item.url, proxy=self.proxy, additional_headers=self.localIP)
         stream_info = JsonHelper(data)
-        m3u8_url = stream_info.get_value("playbackItem", "manifestUrl")
-        if m3u8_url is None:
+        stream_url = stream_info.get_value("playbackItem", "manifestUrl")
+        if stream_url is None:
             return item
+
+        if ".mpd" in stream_url:
+            return self.__update_dash_video(item, stream_info)
 
         part = item.create_new_empty_media_part()
 
         if AddonSettings.use_adaptive_stream_add_on() and False:
-            subtitle = M3u8.get_subtitle(m3u8_url, proxy=self.proxy)
-            stream = part.append_media_stream(m3u8_url, 0)
+            subtitle = M3u8.get_subtitle(stream_url, proxy=self.proxy)
+            stream = part.append_media_stream(stream_url, 0)
             M3u8.set_input_stream_addon_input(stream, self.proxy)
             item.complete = True
         else:
-            m3u8_data = UriHandler.open(m3u8_url, proxy=self.proxy, additional_headers=self.localIP)
-            subtitle = M3u8.get_subtitle(m3u8_url, proxy=self.proxy, play_list_data=m3u8_data)
-            for s, b, a in M3u8.get_streams_from_m3u8(m3u8_url, self.proxy,
+            m3u8_data = UriHandler.open(stream_url, proxy=self.proxy, additional_headers=self.localIP)
+            subtitle = M3u8.get_subtitle(stream_url, proxy=self.proxy, play_list_data=m3u8_data)
+            for s, b, a in M3u8.get_streams_from_m3u8(stream_url, self.proxy,
                                                       play_list_data=m3u8_data, map_audio=True):
                 item.complete = True
                 if not item.isLive and "-video" not in s:
@@ -678,6 +709,53 @@ class Channel(chn_class.Channel):
         else:
             for s, b in M3u8.get_streams_from_m3u8(item.url, self.proxy):
                 part.append_media_stream(s, b)
+
+        item.complete = True
+        return item
+
+    def __set_expire_time(self, expire_date, item):
+        expire_date = expire_date.split("+")[0].replace("T", " ")
+        year = expire_date.split("-")[0]
+        if len(year) == 4 and int(year) < datetime.datetime.now().year + 50:
+            item.description = \
+                "{}\n\n{}: {}".format(item.description or "", self.__expires_text, expire_date)
+
+    def __update_dash_video(self, item, stream_info):
+        """
+
+        :param MediaItem item:          The item that was updated
+        :param JsonHelper stream_info:  The stream info
+        """
+
+        if not AddonSettings.use_adaptive_stream_add_on(with_encryption=True):
+            XbmcWrapper.show_dialog(
+                LanguageHelper.get_localized_string(LanguageHelper.DrmTitle),
+                LanguageHelper.get_localized_string(LanguageHelper.WidevineLeiaRequired))
+            return item
+
+        playback_item = stream_info.get_value("playbackItem")
+
+        stream_url = playback_item["manifestUrl"]
+        part = item.create_new_empty_media_part()
+        stream = part.append_media_stream(stream_url, 0)
+
+        license_info = playback_item.get("license", None)
+        if license_info is not None:
+            license_key_token = license_info["token"]
+            auth_token = license_info["castlabsToken"]
+            header = {
+                "x-dt-auth-token": auth_token,
+                "content-type": "application/octstream"
+            }
+            license_url = license_info["castlabsServer"]
+            license_key = Mpd.get_license_key(
+                license_url, key_value=license_key_token, key_headers=header)
+
+            Mpd.set_input_stream_addon_input(
+                stream, proxy=self.proxy, license_key=license_key)
+            item.isDrmProtected = False
+        else:
+            Mpd.set_input_stream_addon_input(stream, proxy=self.proxy)
 
         item.complete = True
         return item

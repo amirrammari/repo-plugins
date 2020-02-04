@@ -1,16 +1,16 @@
 # coding=utf-8  # NOSONAR
 # SPDX-License-Identifier: CC-BY-NC-SA-4.0
 
-import chn_class
-from helpers.languagehelper import LanguageHelper
+from resources.lib import chn_class
+from resources.lib.helpers.languagehelper import LanguageHelper
 
-from mediaitem import MediaItem
-from parserdata import ParserData
-from regexer import Regexer
-from helpers import subtitlehelper
-from logger import Logger
-from urihandler import UriHandler
-from helpers.jsonhelper import JsonHelper
+from resources.lib.mediaitem import MediaItem
+from resources.lib.parserdata import ParserData
+from resources.lib.regexer import Regexer
+from resources.lib.helpers import subtitlehelper
+from resources.lib.logger import Logger
+from resources.lib.urihandler import UriHandler
+from resources.lib.helpers.jsonhelper import JsonHelper
 
 
 class Channel(chn_class.Channel):
@@ -42,23 +42,16 @@ class Channel(chn_class.Channel):
                               preprocessor=self.add_categories_and_search,
                               parser=["results"], creator=self.create_json_episode_item)
 
-        # Categories
-        cat_reg = r'<a[^>]+href="(?<url>/blad[^"]+)"[^>]*>(?<title>[^<]+)<'
-        cat_reg = Regexer.from_expresso(cat_reg)
-        self._add_data_parser("https://urplay.se/", name="Category parser",
-                              match_type=ParserData.MatchExact,
-                              parser=cat_reg,
-                              creator=self.create_category_item)
-
         # Match Videos (programs)
         self._add_data_parser("https://urplay.se/api/bff/v1/search?product_type=program",
                               name="Most viewed", json=True,
                               parser=["results"], creator=self.create_json_video_item)
 
-        program_reg = r'href="/(?<url>[^/]+/(?<id>\d+)[^"]+)"[^>]*>[^<]+</a>\W+<figure>[\W\w]' \
-                      r'{0,3000}?<h2[^>]*>(?<title>[^<]+)</h2>\W+<p[^>]+>\s*(?<description>[^<]+?)' \
-                      r'\s*<span class="usp">(?<description2>[^<]+)'
-        program_reg = Regexer.from_expresso(program_reg)
+        item_regex = r'href="/(?<url>[^/]+/(?<id>\d+)[^"]+)"[^>]*>[^<]+</a>\W+<figure[^>]*>[\W\w]' \
+                     r'{0,3000}?<h2[^>]*>(?<title>[^<]+)</h2>\W+<p[^>]+>[^>]*<span[^>]+>' \
+                     r'(?<description>[^<]*).{2}<[^>]+>\s*<span[^>]+>(?<duration>\d{1,3})\smin[^>]+' \
+                     r'>\s*<span[^>]*>(?<description2>[^<]+)'
+        item_regex = Regexer.from_expresso(item_regex)
 
         single_video_regex = r'<meta \w+="name" content="(?:[^:]+: )?(?<title>[^"]+)' \
                              r'"[^>]*>\W*<meta \w+="description" content="(?<description>[^"]+)"' \
@@ -68,17 +61,30 @@ class Channel(chn_class.Channel):
                              r'content="(?<date>[^"]+)"'
         single_video_regex = Regexer.from_expresso(single_video_regex)
 
-        self._add_data_parser("*", parser=program_reg, preprocessor=self.get_video_section,
-                              creator=self.create_video_item, updater=self.update_video_item)
+        self._add_data_parser("*", parser=item_regex, preprocessor=self.get_video_section,
+                              creator=self.create_video_item)
         self._add_data_parser("*", parser=single_video_regex, preprocessor=self.get_video_section,
                               creator=self.create_single_video_item, updater=self.update_video_item)
 
         # Folders (Seasons)
-        folder_regex = '<li[^>]+>[^>]+data-description="(?<description>[^"]+)"[^>]+' \
+        season_regex = '<li[^>]+>[^>]+data-description="(?<description>[^"]+)"[^>]+' \
                        'data-asset-id="(?<id>[^"]+)"[^>]+>[\n\r ]*(?<title>[^<]+?)[\n\r ]*<'
-        folder_regex = Regexer.from_expresso(folder_regex)
+        season_regex = Regexer.from_expresso(season_regex)
         self._add_data_parser("*", name="Season Folders",
-                              parser=folder_regex, creator=self.create_folder_item)
+                              parser=season_regex, creator=self.create_folder_item)
+
+        # Categories
+        cat_reg = r'<a[^>]+href="(?<url>/blad[^"]+/(?<slug>[^"]+))"[^>]*>(?<title>[^<]+)<'
+        cat_reg = Regexer.from_expresso(cat_reg)
+        self._add_data_parser("https://urplay.se/", name="Category parser",
+                              match_type=ParserData.MatchExact,
+                              parser=cat_reg,
+                              creator=self.create_category_item)
+
+        self._add_data_parsers(["https://urplay.se/api/bff/v1/search?play_category",
+                                "https://urplay.se/api/bff/v1/search?response_type=category"],
+                               name="Category content", json=True,
+                               parser=["results"], creator=self.create_json_item)
 
         # Searching
         self._add_data_parser("https://urplay.se/search/json", json=True,
@@ -91,6 +97,29 @@ class Channel(chn_class.Channel):
         #===========================================================================================
         # non standard items
         self.__videoItemFound = False
+        self.__cateogory_slugs = {
+            "dokumentarfilmer": "dokument%C3%A4rfilmer",
+            "forelasningar": "f%C3%B6rel%C3%A4sningar",
+            "kultur-och-historia": "kultur%20och%20historia",
+            "reality-och-livsstil": "reality%20och%20livsstil",
+            "samhalle": "samh%C3%A4lle"
+        }
+        self.__cateogory_urls = {
+            "radio": "https://urplay.se/api/bff/v1/search?response_type=category"
+                     "&singles_and_series=true"
+                     "&rows=1000&start=0"
+                     "&type=programradio&view=title",
+            "syntolkat": "https://urplay.se/api/bff/v1/search?response_type=category"
+                         "&singles_and_series=true"
+                         "&rows=1000&start=0"
+                         "&view=title"
+                         "&with_audio_description=true",
+            "teckensprak": "https://urplay.se/api/bff/v1/search?response_type=category"
+                           "&language=sgn-SWE"
+                           "&rows=1000&start=0"
+                           "&view=title"                         
+                           "&singles_and_series=true&view=title"
+        }
 
         #===========================================================================================
         # Test cases:
@@ -116,8 +145,21 @@ class Channel(chn_class.Channel):
         if 'thumburl' in result_set and not result_set['thumburl'].startswith("http"):
             result_set['thumburl'] = "%s/%s" % (self.baseUrl, result_set["thumburl"])
 
-        result_set["url"] = "%s?rows=1000&start=0" % (result_set["url"],)
-        return self.create_folder_item(result_set)
+        slug = result_set["slug"]
+        url = self.__cateogory_urls.get(slug)
+        slug = self.__cateogory_slugs.get(slug, slug)
+
+        if url is None:
+            result_set["url"] = "https://urplay.se/api/bff/v1/search?play_category={}" \
+                                "&response_type=category" \
+                                "&rows=1000" \
+                                "&singles_and_series=true" \
+                                "&start=0" \
+                                "&view=title".format(slug)
+        else:
+            result_set["url"] = url
+
+        return chn_class.Channel.create_folder_item(self, result_set)
 
     def add_categories_and_search(self, data):
         """ Adds some generic items such as search and categories to the main listing.
@@ -173,6 +215,32 @@ class Channel(chn_class.Channel):
 
         url = "https://urplay.se/search/json?query=%s"
         return chn_class.Channel.search_site(self, url)
+
+    def create_json_item(self, result_set):
+        """ Creates a new MediaItem for an folder or video.
+
+        This method creates a new MediaItem from the Regular Expression or Json
+        results <result_set>. The method should be implemented by derived classes
+        and are specific to the channel.
+
+        :param list[str]|dict[str,str] result_set: The result_set of the self.episodeItemRegex
+
+        :return: A new MediaItem of type 'folder'.
+        :rtype: MediaItem|None
+
+        """
+
+        Logger.trace(result_set)
+
+        item_type = result_set["format"]
+        if item_type == "video":
+            return self.create_json_video_item(result_set)
+        elif item_type == "audio":
+            # Apparently the audio is always linking to a show folder.
+            return self.create_json_episode_item(result_set)
+        else:
+            Logger.warning("Found unknown type: %s", item_type)
+            return None
 
     def create_json_episode_item(self, result_set):
         """ Creates a new MediaItem for an episode.
@@ -261,7 +329,11 @@ class Channel(chn_class.Channel):
 
         Logger.trace(result_set)
 
-        title = "%(title)s" % result_set
+        main_title = result_set.get("mainTitle")
+        if main_title:
+            title = "{} - {}".format(main_title, result_set["title"])
+        else:
+            title = "%(title)s" % result_set
         url = "%s/program/%s" % (self.baseUrl, result_set["slug"])
         fanart = "https://assets.ur.se/id/%(id)s/images/1_hd.jpg" % result_set
         thumb = "https://assets.ur.se/id/%(id)s/images/1_l.jpg" % result_set
@@ -335,6 +407,10 @@ class Channel(chn_class.Channel):
         item.fanart = self.parentItem.fanart
         item.icon = self.icon
         item.complete = False
+
+        duration = result_set.get("duration")
+        if duration:
+            item.set_info_label("duration", int(duration) * 60)
 
         self.__videoItemFound = True
         return item
@@ -481,7 +557,9 @@ class Channel(chn_class.Channel):
                     subtitle = subtitlehelper.SubtitleHelper.download_subtitle(
                         url, file_name, "ttml", proxy=self.proxy)
                 break
-        part.Subtitle = subtitle
+
+        if subtitle is not None:
+            part.Subtitle = subtitle
 
         item.complete = True
         return item

@@ -15,12 +15,18 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import json
+
 try:
+    from html.parser import HTMLParser
     from urllib.request import urlopen
 except ImportError:
+    from HTMLParser import HTMLParser
     from urllib2 import urlopen
 
-import json
+import xbmcaddon
+
+addon = xbmcaddon.Addon()
 
 
 def getJsonFromUrl(url):
@@ -28,13 +34,33 @@ def getJsonFromUrl(url):
     return json.loads(document)
 
 
-def getTitle(content):
-    return content["ueberschrift"]
+def sanitize(text):
+    h = HTMLParser()
+    return h.unescape(text)
+
+
+def getTitle(content, dgs):
+    outp = []
+    outp.append(addon.getLocalizedString(30001))
+    outp.append(addon.getLocalizedString(30002))
+    outp.append(content["dachzeile"].split(" | ")[0])
+
+    if dgs == 1:
+        outp.append("(" + addon.getLocalizedString(30040) + ")")
+
+    return sanitize(" ".join(outp))
+
+
+def getDescription(content):
+    desc = content["bilder"][0]["alt"].split(",")
+    desc.pop()
+    return sanitize("".join(desc))
 
 
 def getImage(content, width):
-    image_url = content["bilder"][0]["schemaUrl"]
-    return image_url.replace("##width##", str(width))
+    schema_url = content["bilder"][0]["schemaUrl"]
+    image_url = schema_url.replace("##width##", str(width))
+    return image_url.replace("?mandant=ard", "")
 
 
 def getEpisodeUrl(content):
@@ -46,19 +72,15 @@ def getStreamId(episode_url):
     return url_path.split("/").pop()
 
 
-def getEpisodeData(episodes_url, quality):
-    episodes = getJsonFromUrl(episodes_url)
-    episode_data = episodes["sections"][0]["modCons"][1]["mods"][0]["inhalte"][0]
-    title = getTitle(episode_data)
-    thumbnail_image = getImage(episode_data, 640)
-    fanart_image = getImage(episode_data, 1920)
+def getDuration(content):
+    return int(content["unterzeile"].split(" ")[0])
 
-    episode_url = getEpisodeUrl(episode_data)
-    sendung_id = getStreamId(episode_url)
 
-    streams_url = "https://appdata.ardmediathek.de/appdata/servlet/play/media/" + sendung_id
+def getEpisodeData(data, quality, dgs):
+    episode_url = getEpisodeUrl(data)
+    stream_id = getStreamId(episode_url)
+    streams_url = "https://appdata.ardmediathek.de/appdata/servlet/play/media/" + stream_id
     result = getJsonFromUrl(streams_url)
-
     mediaStreamArray = result["_mediaArray"][0]["_mediaStreamArray"]
     streams = {
         0: mediaStreamArray[0]["_stream"],  # "auto"
@@ -69,4 +91,23 @@ def getEpisodeData(episodes_url, quality):
         5: mediaStreamArray[3]["_stream"][1]  # "1800k
     }
 
-    return [title, thumbnail_image, fanart_image, streams[quality]]
+    return {
+        "desc": getDescription(data),
+        "duration": getDuration(data),
+        "fanart": getImage(data, 1920),
+        "stream": streams[quality],
+        "thumb": getImage(data, 640),
+        "title": getTitle(data, dgs)
+    }
+
+
+def getEpisodes(episodes_url, quality, dgs):
+    episodes_json = getJsonFromUrl(episodes_url)
+    episodes = episodes_json["sections"][0]["modCons"][1]["mods"][0]["inhalte"]
+
+    episode_list = []
+    for i, episode in enumerate(episodes):
+        if dgs == 1 or i % 2 == 0:
+            episode_list.append(getEpisodeData(episode, quality, i % 2 != 0))
+
+    return episode_list
